@@ -13,171 +13,224 @@ class Yad2Scraper(BaseScraper):
     def __init__(self, db_session):
         super().__init__(db_session, 'yad2')
         self.base_url = "https://www.yad2.co.il"
-
-    def build_search_url(self) -> str:
-        """Build Yad2 search URL with filters"""
-        cities = settings.get_cities_list()
-
-        # Yad2 uses specific city codes - this is simplified
-        # In production, you'd need to map city names to Yad2 city IDs
-        params = {
-            'price': f'-{int(settings.max_price)}',
-            'rooms': f'{settings.min_rooms}-',
-            'Order': '1'  # Sort by newest
+        self.city_map = {
+            'תל אביב-יפו': '5000',
+            'תל אביב': '5000',
+            'ירושלים': '3000',
+            'חיפה': '4000',
+            'פתח תקווה': '7900',
+            'כפר סבא': '6900',
+            'הוד השרון': '9700',
+            'הרצליה': '6400',
+            'רעננה': '8700',
+            'רמת גן': '8600',
+            'גבעתיים': '6300',
+            'רמת השרון': '2640',
+            'חולון': '6600',
+            'ראשון לציון': '8300',
+            'נתניה': '7400',
+            'אשדוד': '70',
+            'באר שבע': '9000',
+            'רחובות': '8400',
+            'כפר שמריהו': '7000',
+            'רשפון': '887',
+            'בצרה': '885',
+            'בני ציון': '883',
+            'צופית': '884',
+            'גן חיים': '882',
+            'גבעת חן': '881',
         }
 
-        # Build URL
-        url = f"{self.base_url}/realestate/forsale?"
-        url += "&".join([f"{k}={v}" for k, v in params.items()])
+    def build_search_url(self, area_params: Optional[Dict] = None) -> str:
+        """Build Yad2 search URL with filters.
 
-        return url
+        If area_params is broad (e.g. topArea=2), it covers many cities. 
+        The listing_filter narrows further by city allowlist.
+        """
+        endpoint = "rent" if settings.listing_type.lower() == "rent" else "forsale"
+        
+        # Default to Center region if none specified
+        params = {
+            'topArea': '2',
+            'maxPrice': str(int(settings.max_price)),
+            'minRooms': str(settings.min_rooms),
+            'Order': '1',
+        }
+        
+        if area_params:
+            params.update(area_params)
+            
+        return f"{self.base_url}/realestate/{endpoint}?" + "&".join(f"{k}={v}" for k, v in params.items())
 
     def scrape(self) -> List[Dict]:
-        """Scrape Yad2 listings"""
+        """Scrape Yad2 listings across Center and Sharon regions"""
         if not self.page:
             logger.error("[Yad2 Scraper] Browser page not initialized")
             return []
 
-        listings = []
+        all_listings = []
+        
+        # Build search areas based on exact city IDs from settings
+        areas = []
+        for city_name in settings.get_cities_list():
+            if city_name in self.city_map:
+                areas.append({'city': self.city_map[city_name], '_name': city_name})
+            else:
+                logger.warning(f"[Yad2 Scraper] City '{city_name}' not in Yad2 city map, skipping.")
+        
+        if not areas:
+            logger.warning("[Yad2 Scraper] No valid cities mapped, falling back to Center.")
+            areas = [{'topArea': '2', '_name': 'Center'}]
 
-        try:
-            # Navigate to search results
-            search_url = self.build_search_url()
-            logger.info(f"[Yad2 Scraper] Navigating to search page, url: {search_url}")
+        for area_params in areas:
+            area_name = area_params.pop('_name', 'Unknown')
+            try:
+                # Navigate to search results
+                search_url = self.build_search_url(area_params)
+                logger.info(f"[Yad2 Scraper] Scraping area {area_name}, url: {search_url}")
 
-            # Navigate to the page
-            self.page.get(search_url)
-            logger.info("[Yad2 Scraper] Page loaded successfully")
+                # Navigate to the page
+                self.page.get(search_url)
+                logger.info(f"[Yad2 Scraper] Page loaded for area {area_name}")
 
-            # Wait for page to settle
-            self.random_delay(2, 3)
+                # Wait for page to settle
+                self.random_delay(2, 3)
 
-            # Check for anti-bot protection (CAPTCHA, etc.)
-            self._handle_anti_bot_protection()
+                # Check for anti-bot protection (CAPTCHA, etc.)
+                self._handle_anti_bot_protection()
 
-            # Longer initial delay to let anti-bot scripts run
-            self.random_delay(3, 6)
-            logger.debug("[Yad2 Scraper] Initial delay completed")
+                # Longer initial delay to let anti-bot scripts run
+                self.random_delay(3, 5)
 
-            # Simulate human-like mouse movements
-            self.human_like_mouse_movement()
-            logger.debug("[Yad2 Scraper] Mouse movements simulated")
+                # Simulate human-like mouse movements
+                self.human_like_mouse_movement()
 
-            # Scroll to load more results with human-like behavior
-            logger.info("[Yad2 Scraper] Scrolling page to load dynamic content, scrolls: 3")
-            self.scroll_page(scrolls=3)
-            self.random_delay(2, 4)
+                # Scroll to load more results
+                self.scroll_page(scrolls=2)
+                self.random_delay(1, 2)
 
-            # Get listing cards - try multiple selectors as Yad2 changes frequently
-            logger.info("[Yad2 Scraper] Attempting to find listing cards with selector: .feeditem")
-            listing_cards = self.page.eles('.feeditem')
-
-            if not listing_cards:
-                logger.info("[Yad2 Scraper] Primary selector failed, trying alternative: css:[class*=\"feed_item\"]")
-                listing_cards = self.page.eles('css:[class*="feed_item"]')
-
-            if not listing_cards:
-                logger.info("[Yad2 Scraper] Second selector failed, trying: css:[data-testid*=\"item\"]")
-                listing_cards = self.page.eles('css:[data-testid*="item"]')
-
-            if not listing_cards:
-                logger.info("[Yad2 Scraper] Third selector failed, trying generic: article, css:div[class*=\"item\"]")
-                listing_cards = self.page.eles('tag:article')
+                # Find listing cards
+                listing_cards = self.page.eles('css:a[data-nagish="property-ad-card-link"]')
                 if not listing_cards:
-                    listing_cards = self.page.eles('css:div[class*="item"]')
+                    listing_cards = self.page.eles('css:a[href*="/realestate/item/"]')
 
-            logger.info(f"[Yad2 Scraper] Found listing cards, count: {len(listing_cards)}")
+                logger.info(f"[Yad2 Scraper] Found {len(listing_cards)} listings in area {area_name}")
 
-            # Debug: Save page if no listings found
-            if len(listing_cards) == 0:
-                logger.warning("[Yad2 Scraper] No listing cards found - saving debug output")
-                self.debug_save_page("no_listings")
+                # Two-pass: collect card data first, then fetch detail pages
+                # for new listings only. Yad2 cards show rooms/size/floor but
+                # not amenity text (elevator/parking/balcony/mamad) — those
+                # are on the detail page.
+                raw_cards = []
+                for idx, card in enumerate(listing_cards[:25], 1):
+                    try:
+                        listing_data = self._extract_listing_data(card, idx=idx)
+                        if listing_data:
+                            raw_cards.append(listing_data)
+                    except Exception as e:
+                        logger.warning(f"[Yad2 Scraper] Error extracting listing in area {area_name}, index: {idx}, error: {e}")
+                        continue
 
-            # Process only first 20-30 newest listings per scrape
-            max_listings = min(len(listing_cards), 30)
-            logger.info(f"[Yad2 Scraper] Processing listings, max_count: {max_listings}")
-
-            for idx, card in enumerate(listing_cards[:30], 1):
-                try:
-                    logger.debug(f"[Yad2 Scraper] Extracting listing data, index: {idx}/{max_listings}")
-                    listing_data = self._extract_listing_data(card)
-                    if listing_data:
+                area_listings_count = 0
+                for idx, listing_data in enumerate(raw_cards, 1):
+                    try:
+                        ext_id = listing_data.get('external_id')
+                        price = listing_data.get('price') or 0
+                        # Skip detail-page fetch for cards that are already
+                        # over MAX_PRICE — the processor will reject them;
+                        # no reason to navigate Chrome there.
+                        too_expensive = settings.max_price and price > settings.max_price
+                        if ext_id and not self.listing_exists(ext_id) and not too_expensive:
+                            detail_url = listing_data.get('url')
+                            logger.debug(f"[Yad2 Scraper] New listing, fetching detail: {detail_url}")
+                            listing_data['detail_text'] = self.fetch_detail_text(detail_url)
+                            self.random_delay(1.5, 3)
+                        elif too_expensive:
+                            logger.debug(f"[Yad2 Scraper] Skipping detail fetch — price {price} > max {settings.max_price}")
                         parsed = self.parse_listing(listing_data)
                         if parsed:
-                            listings.append(parsed)
-                            logger.debug(f"[Yad2 Scraper] Successfully parsed listing, title: {parsed.get('title', 'N/A')[:50]}")
-                        else:
-                            logger.debug(f"[Yad2 Scraper] Failed to parse listing data, index: {idx}")
-                    else:
-                        logger.debug(f"[Yad2 Scraper] Failed to extract listing data, index: {idx}")
-                except Exception as e:
-                    logger.warning(f"[Yad2 Scraper] Error extracting listing, index: {idx}, error: {e}")
-                    continue
+                            all_listings.append(parsed)
+                            area_listings_count += 1
+                    except Exception as e:
+                        logger.warning(f"[Yad2 Scraper] Error parsing listing in area {area_params.get('topArea')}, index: {idx}, error: {e}")
+                        continue
+                
+                logger.info(f"[Yad2 Scraper] Successfully parsed {area_listings_count} listings in area {area_params.get('topArea')}")
+                
+                # Random delay between areas
+                self.random_delay(4, 8)
 
-            logger.info(f"[Yad2 Scraper] Scraping completed, total_listings: {len(listings)}")
+            except Exception as e:
+                logger.error(f"[Yad2 Scraper] Error scraping area {area_params.get('topArea')}: {e}")
+                continue
 
-        except Exception as e:
-            logger.error(f"[Yad2 Scraper] Fatal error during scraping, error: {e}")
-            raise
+        logger.info(f"[Yad2 Scraper] Total scraping completed, total_listings: {len(all_listings)}")
+        return all_listings
 
-        return listings
+    def _extract_listing_data(self, card, idx: Optional[int] = None) -> Optional[Dict]:
+        """Extract data from a single listing card.
 
-    def _extract_listing_data(self, card) -> Optional[Dict]:
-        """Extract data from a single listing card"""
+        Yad2's 2026 markup: the card IS an <a data-nagish="property-ad-card-link">
+        wrapping the image, price ([data-testid="price"]), address
+        ([data-testid="address-line"]), and a details blurb ("N חדרים • קומה X • Y מ\"ר").
+        """
+        tag = f"[Yad2] card {idx}" if idx is not None else "[Yad2] card"
         try:
-            # Extract link and ID
-            link_element = card.ele('css:a.feed_item', timeout=2)
-            if not link_element:
-                return None
-
-            href = link_element.link
+            # The card itself is the <a>; href lives on its attribute.
+            href = card.attr('href')
             if not href:
+                # Fallback: maybe it's a wrapper with a nested anchor.
+                inner = card.ele('tag:a', timeout=1)
+                href = inner.link if inner else None
+            if not href:
+                logger.warning(f"{tag}: no href on anchor")
                 return None
 
             full_url = self.base_url + href if href.startswith('/') else href
 
-            # Extract ID from URL
-            id_match = re.search(r'/item/(\d+)', href)
+            # Yad2 listing IDs are alphanumeric, e.g. /realestate/item/<region>/<id>?...
+            id_match = re.search(r'/realestate/item/[^/]+/([^?&/]+)', href)
             external_id = id_match.group(1) if id_match else None
+            if not external_id:
+                logger.warning(f"{tag}: could not parse external_id from href={href!r}")
 
-            # Extract title
-            title_element = card.ele('.title', timeout=2)
-            title = title_element.text if title_element else ""
+            details_text = card.text or ""
 
-            # Extract price
-            price_element = card.ele('.price', timeout=2)
+            # Price via data-testid
+            price_element = card.ele('css:[data-testid="price"]', timeout=1)
             price_text = price_element.text if price_element else ""
+            if not price_text:
+                logger.warning(f"{tag}: price selector [data-testid=price] missed")
             price = self._extract_number(price_text)
 
-            # Extract details
-            details_text = card.text
+            # Address via data-testid
+            address_element = card.ele('css:[data-testid="address-line"]', timeout=1)
+            location_text = address_element.text if address_element else ""
+            if not location_text:
+                logger.warning(f"{tag}: address selector [data-testid=address-line] missed")
 
-            # Extract rooms
+            # Title falls back to address (yad2 cards have no dedicated title).
+            title = location_text
+
             rooms = self._extract_rooms(details_text)
-
-            # Extract size
             size_sqm = self._extract_size(details_text)
-
-            # Extract floor
             floor = self._extract_floor(details_text)
-
-            # Extract address/location
-            location_element = card.ele('.subtitle', timeout=2)
-            location_text = location_element.text if location_element else ""
 
             city, neighborhood, street = self._parse_location(location_text)
 
-            # Extract contact
-            contact_name = ""
-            contact_phone = ""
+            # "Posted X ago" — Yad2 renders this inline in the card text.
+            posted_at = self.parse_relative_time(details_text)
 
-            # Extract images
             images = []
             img_elements = card.eles('tag:img')
-            for img in img_elements[:5]:  # Max 5 images
+            for img in img_elements[:5]:
                 src = img.attr('src')
                 if src and 'http' in src:
                     images.append(src)
+
+            try:
+                card_html = card.html or ''
+            except Exception:
+                card_html = ''
 
             return {
                 'external_id': external_id,
@@ -192,13 +245,15 @@ class Yad2Scraper(BaseScraper):
                 'street': street,
                 'location_text': location_text,
                 'details_text': details_text,
-                'contact_name': contact_name,
-                'contact_phone': contact_phone,
+                'card_html': card_html,
+                'posted_at': posted_at,
+                'contact_name': '',
+                'contact_phone': '',
                 'images': images
             }
 
         except Exception as e:
-            logger.debug(f"Error extracting Yad2 listing data: {e}")
+            logger.warning(f"{tag}: exception while extracting: {e}")
             return None
 
     def parse_listing(self, raw_data: Dict) -> Optional[Dict]:
@@ -209,14 +264,14 @@ class Yad2Scraper(BaseScraper):
             if raw_data.get('price') and raw_data.get('size_sqm') and raw_data['size_sqm'] > 0:
                 price_per_sqm = raw_data['price'] / raw_data['size_sqm']
 
-            # Detect features from text
-            details_lower = raw_data.get('details_text', '').lower()
-
-            has_elevator = any(word in details_lower for word in ['מעלית', 'elevator'])
-            has_parking = any(word in details_lower for word in ['חניה', 'parking', 'חנייה'])
-            has_balcony = any(word in details_lower for word in ['מרפסת', 'balcony', 'mirpeset'])
-            has_mamad = any(word in details_lower for word in ['ממ"ד', 'ממד', 'mamad', 'מרחב מוגן', 'מקלט'])
-
+            haystack = ' '.join([
+                raw_data.get('details_text', '') or '',
+                raw_data.get('title', '') or '',
+                raw_data.get('location_text', '') or '',
+                raw_data.get('detail_text', '') or '',
+                raw_data.get('card_html', '') or '',
+            ])
+            features = self.extract_features(haystack)
 
             return {
                 'source': 'yad2',
@@ -233,10 +288,8 @@ class Yad2Scraper(BaseScraper):
                 'floor': raw_data.get('floor'),
                 'price': raw_data.get('price'),
                 'price_per_sqm': price_per_sqm,
-                'has_elevator': has_elevator,
-                'has_parking': has_parking,
-                'has_balcony': has_balcony,
-                'has_mamad': has_mamad,
+                'posted_at': raw_data.get('posted_at'),
+                **features,
                 'contact_name': raw_data.get('contact_name'),
                 'contact_phone': raw_data.get('contact_phone'),
                 'images': raw_data.get('images', [])

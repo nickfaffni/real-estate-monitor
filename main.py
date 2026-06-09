@@ -14,7 +14,7 @@ import uvicorn
 from fastapi import FastAPI
 from app.core.config import settings
 from app.core.database import init_db
-from app.services.scheduler import ScrapingScheduler
+from app.core.lifecycle import get_scheduler, get_shutdown_event
 from app.core.deal_score import update_neighborhood_stats
 
 
@@ -30,11 +30,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Global shutdown event
-shutdown_event = asyncio.Event()
-
-# Global scheduler instance
-scheduler_instance = None
+# Shutdown event managed by lifecycle
+shutdown_event = get_shutdown_event()
 
 
 def setup_database():
@@ -49,8 +46,9 @@ async def run_scheduler():
     """Run the scraping scheduler with shutdown support"""
     global scheduler_instance
 
-    scheduler_instance = ScrapingScheduler(shutdown_event)
-    scheduler_instance.start()
+    scheduler_instance = get_scheduler()
+    if not scheduler_instance.is_running:
+        scheduler_instance.start()
 
     try:
         # Keep running until shutdown signal

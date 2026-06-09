@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, Query
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -8,13 +8,20 @@ from app.core.database import Listing, NeighborhoodStats, init_db
 from app.core.config import settings
 from datetime import datetime, timedelta
 from typing import Optional
-import logging
 import urllib.parse
+from app.core.lifecycle import get_scheduler
+from dotenv import set_key, load_dotenv
+import os
+import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(title="Real Estate Monitor")
+
+# Mount static files (Signal dashboard assets)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Setup templates
 templates = Jinja2Templates(directory="templates")
@@ -50,6 +57,37 @@ def days_ago(date):
         months = delta.days // 30
         return f"{months} months ago" if months > 1 else "1 month ago"
 
+def ago_label(dt: Optional[datetime]) -> Optional[str]:
+    """Compact relative-age label with hour granularity under a day.
+
+    None in → None out (client renders 'unknown'). We anchor at utcnow, so a
+    posted_at from the future (shouldn't happen) clamps to 'just now'.
+    """
+    if not dt:
+        return None
+    delta = datetime.utcnow() - dt
+    secs = max(0, int(delta.total_seconds()))
+    if secs < 3600:
+        return "just now"
+    hours = secs // 3600
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 7:
+        return f"{days}d ago"
+    weeks = days // 7
+    if weeks < 5:
+        return f"{weeks}w ago"
+    months = days // 30
+    return f"{months}mo ago"
+
+
+def format_date(date):
+    """Format a datetime as YYYY-MM-DD HH:MM (falls back for None)."""
+    if not date:
+        return "Unknown"
+    return date.strftime("%Y-%m-%d %H:%M")
+
 def get_whatsapp_url(phone, address, source):
     """Generate WhatsApp URL with pre-filled message"""
     if not phone:
@@ -74,6 +112,7 @@ def get_whatsapp_url(phone, address, source):
 # Register template filters
 templates.env.globals['format_price'] = format_price
 templates.env.globals['days_ago'] = days_ago
+templates.env.globals['format_date'] = format_date
 templates.env.globals['get_whatsapp_url'] = get_whatsapp_url
 templates.env.globals['datetime'] = datetime
 
@@ -90,84 +129,173 @@ def get_db():
         db.close()
 
 
+def normalize_city_name(name: str) -> str:
+    if not name: return ""
+    # Standardize common variations (hyphens, spaces, double vavs)
+    n = str(name).replace("-", " ").strip()
+    n = " ".join(n.split()) # collapse whitespace
+    if n == "פתח תקוה": n = "פתח תקווה"
+    if n == "תל אביב יפו": n = "תל אביב-יפו"
+    if n == "תל אביב": n = "תל אביב-יפו"
+    return n
+
+
 @app.get("/", response_class=HTMLResponse)
-async def index(
-    request: Request,
-    db: Session = Depends(get_db),
-    status: Optional[str] = None,
-    min_score: Optional[float] = None,
-    max_price: Optional[float] = None,
-    city: Optional[str] = None,
-    neighborhood: Optional[str] = None,
-    sort_by: str = "deal_score"
-):
-    """Main dashboard page"""
+async def index(request: Request, db: Session = Depends(get_db)):
+    """Main dashboard page (Signal UI). The React app fetches /api/listings itself."""
 
-    # Build query
-    query = db.query(Listing)
-
-    # Apply filters
-    if status and status != 'all':
-        query = query.filter(Listing.status == status)
-    else:
-        # Default: show unseen and interested
-        query = query.filter(Listing.status.in_(['unseen', 'interested']))
-
-    if min_score:
-        query = query.filter(Listing.deal_score >= min_score)
-
-    if max_price:
-        query = query.filter(Listing.price <= max_price)
-
-    if city:
-        query = query.filter(Listing.city == city)
-
-    if neighborhood:
-        query = query.filter(Listing.neighborhood == neighborhood)
-
-    # Apply sorting
-    if sort_by == "deal_score":
-        query = query.order_by(desc(Listing.deal_score))
-    elif sort_by == "price_asc":
-        query = query.order_by(Listing.price)
-    elif sort_by == "price_desc":
-        query = query.order_by(desc(Listing.price))
-    elif sort_by == "newest":
-        query = query.order_by(desc(Listing.first_seen))
-    elif sort_by == "recently_updated":
-        query = query.order_by(desc(Listing.last_seen))
-
-    listings = query.all()
-
-    # Get statistics
     total_listings = db.query(Listing).count()
-    new_today = db.query(Listing).filter(
-        Listing.first_seen >= datetime.utcnow() - timedelta(days=1)
-    ).count()
+    today = datetime.utcnow().date()
+    new_today = db.query(Listing).filter(func.date(Listing.first_seen) == today).count()
     high_score = db.query(Listing).filter(Listing.deal_score >= 80).count()
-
-    # Get unique cities and neighborhoods for filters
-    cities = db.query(Listing.city).distinct().all()
-    cities = [c[0] for c in cities if c[0]]
-
-    neighborhoods = db.query(Listing.neighborhood).distinct().all()
-    neighborhoods = [n[0] for n in neighborhoods if n[0]]
+    avg_score = db.query(func.avg(Listing.deal_score)).scalar() or 0
+    
+    raw_cities = [c[0] for c in db.query(Listing.city).distinct().all() if c[0]]
+    cities_set = set()
+    for c in raw_cities:
+        cities_set.add(normalize_city_name(c))
+    cities = list(cities_set)
+    cities.sort()
+    
+    # Get city-neighborhood pairs for dynamic filtering, normalize
+    city_hood_pairs = db.query(Listing.city, Listing.neighborhood).distinct().all()
+    neighborhoods_map = []
+    seen_pairs = set()
+    for city_name, hood_name in city_hood_pairs:
+        if city_name and hood_name:
+            norm_city = normalize_city_name(city_name)
+            if (norm_city, hood_name) not in seen_pairs:
+                neighborhoods_map.append({"city": norm_city, "name": hood_name})
+                seen_pairs.add((norm_city, hood_name))
+    
+    # Sort for consistent UI
+    neighborhoods_map.sort(key=lambda x: (x["city"], x["name"]))
 
     return templates.TemplateResponse("index.html", {
         "request": request,
-        "listings": listings,
         "total_listings": total_listings,
         "new_today": new_today,
         "high_score": high_score,
+        "avg_score": round(avg_score),
         "cities": cities,
-        "neighborhoods": neighborhoods,
-        "current_status": status or 'active',
-        "current_city": city or '',
-        "current_neighborhood": neighborhood or '',
-        "current_min_score": min_score or 0,
-        "current_max_price": max_price or settings.max_price,
-        "current_sort": sort_by
+        "neighborhoods": neighborhoods_map,
+        "current_city": "",
+        "current_neighborhood": "",
+        "current_min_score": 0,
+        "current_mamad": False,
+        "current_status": "all",
+        "current_sort": "deal_score",
     })
+
+
+@app.get("/api/listings")
+async def api_listings(
+    city: list[str] = Query([]),
+    neighborhood: list[str] = Query([]),
+    min_score: int = 0,
+    has_mamad: bool = False,
+    sort_by: str = "deal_score",
+    status: str = "all",
+    db: Session = Depends(get_db),
+):
+    """JSON feed consumed by the Signal React dashboard."""
+    q = db.query(Listing)
+    
+    # Handle cases where city might be passed as a single string with commas
+    actual_cities = []
+    if city:
+        for c in city:
+            if "," in c:
+                actual_cities.extend([x.strip() for x in c.split(",") if x.strip()])
+            else:
+                if c.strip():
+                    actual_cities.append(c.strip())
+        
+    if actual_cities:
+        # For each selected city, also include common variations in the query
+        query_cities = set(actual_cities)
+        for c in actual_cities:
+            if c == "תל אביב-יפו":
+                query_cities.add("תל אביב יפו")
+                query_cities.add("תל אביב")
+            if c == "פתח תקווה":
+                query_cities.add("פתח תקוה")
+            # Also add hyphenated versions for all cities
+            if " " in c:
+                query_cities.add(c.replace(" ", "-"))
+            if "-" in c:
+                query_cities.add(c.replace("-", " "))
+                
+        q = q.filter(Listing.city.in_(list(query_cities)))
+
+    if neighborhood:
+        # Handle cases where neighborhood might be passed as a single string with commas
+        actual_neighborhoods = []
+        for n in neighborhood:
+            if "," in n:
+                actual_neighborhoods.extend([x.strip() for x in n.split(",") if x.strip()])
+            else:
+                if n.strip():
+                    actual_neighborhoods.append(n.strip())
+        
+        if actual_neighborhoods:
+            q = q.filter(Listing.neighborhood.in_(actual_neighborhoods))
+
+    if min_score:
+        q = q.filter(Listing.deal_score >= min_score)
+    if has_mamad:
+        q = q.filter(Listing.has_mamad == True)
+    if status and status != "all":
+        q = q.filter(Listing.status == status)
+
+    sort_col = {
+        "deal_score": desc(Listing.deal_score),
+        "price_asc": Listing.price.asc(),
+        "price_desc": desc(Listing.price),
+        "newest": desc(Listing.first_seen),
+        "price_per_sqm": Listing.price_per_sqm.asc(),
+    }.get(sort_by, desc(Listing.deal_score))
+    q = q.order_by(sort_col)
+
+    now = datetime.utcnow()
+    out = []
+    for l in q.limit(200).all():
+        images = l.get_images() if hasattr(l, "get_images") else []
+        days = (now - l.first_seen).days if l.first_seen else 0
+        city_name = normalize_city_name(l.city)
+            
+        out.append({
+            "id": l.id,
+            "he": l.title or "",
+            "neighborhood": l.neighborhood or "",
+            "city": city_name,
+            "price": l.price or 0,
+            "sqm": l.size_sqm or 0,
+            "rooms": l.rooms or 0,
+            "floor": l.floor or 0,
+            "pricePerSqm": l.price_per_sqm or 0,
+            "score": l.deal_score or 0,
+            "scoreBreakdown": l.get_score_breakdown() if hasattr(l, "get_score_breakdown") else None,
+            "status": l.status or "unseen",
+            "source": l.source or "",
+            "daysAgo": days,
+            "postedLabel": ago_label(l.posted_at),
+            "scrapedLabel": ago_label(l.first_seen),
+            "features": {
+                "mamad": bool(getattr(l, "has_mamad", False)),
+                "miklat": bool(getattr(l, "has_miklat", False)),
+                "parking": bool(getattr(l, "has_parking", False)),
+                "elevator": bool(getattr(l, "has_elevator", False)),
+                "balcony": bool(getattr(l, "has_balcony", False)),
+            },
+            "trend": 0,
+            "isNew": days == 0,
+            "image": images[0] if images else None,
+            "url": l.url or "#",
+            "lat": l.latitude,
+            "lng": l.longitude,
+        })
+    return out
 
 
 @app.get("/listing/{listing_id}", response_class=HTMLResponse)
@@ -205,7 +333,7 @@ async def update_listing_status(
 ):
     """Update listing status (like/hide/contacted)"""
 
-    valid_statuses = ['unseen', 'interested', 'not_interested', 'contacted']
+    valid_statuses = ['unseen', 'viewed', 'interested', 'not_interested', 'contacted']
     if status not in valid_statuses:
         raise HTTPException(status_code=400, detail="Invalid status")
 
@@ -389,9 +517,22 @@ async def get_scraper_status():
 
     captcha_info = captcha_state.get_status()
 
+    # The Pause/Start button reads is_paused to decide its label and which
+    # endpoint to hit. It must reflect the *scheduler* state (not just
+    # CAPTCHA) — otherwise clicking Pause calls /stop successfully but the
+    # next status poll still says is_paused=false, the button keeps reading
+    # "Pause", and the Start button never appears.
+    scheduler = get_scheduler()
+    # APScheduler states: 0=STOPPED, 1=RUNNING, 2=PAUSED. is_running is our
+    # "has ever been started" flag — so we treat "paused" as not-running
+    # from the UI's point of view.
+    aps_state = getattr(scheduler.scheduler, "state", 0)
+    scheduler_active = bool(getattr(scheduler, "is_running", False)) and aps_state == 1
+
     return {
         "captcha": captcha_info,
-        "is_paused": captcha_state.is_waiting(),
+        "is_paused": (not scheduler_active) or captcha_state.is_waiting(),
+        "scheduler_running": scheduler_active,
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -455,3 +596,148 @@ async def database_stats(db: Session = Depends(get_db)):
         ],
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+@app.post("/api/scraper/start")
+async def start_scraper():
+    """Start (or resume) the scraping scheduler.
+
+    APScheduler's lifecycle is one-shot — once `.shutdown()` is called the
+    instance can't be `.start()`-ed again. So we model the Pause button as
+    `scheduler.pause()` / `scheduler.resume()` instead of stop/start, which
+    is what the underlying library actually supports."""
+    scheduler = get_scheduler()
+    aps = scheduler.scheduler  # underlying AsyncIOScheduler
+    try:
+        if not scheduler.is_running:
+            # First run: full .start() (wires jobs, kicks off initial scrape)
+            scheduler.start()
+            logger.info("Scraper started via dashboard")
+            return {"success": True, "message": "Scraper started"}
+        if aps.state == 2:  # STATE_PAUSED
+            aps.resume()
+            logger.info("Scraper resumed via dashboard")
+            return {"success": True, "message": "Scraper resumed"}
+        return {"success": False, "message": "Scraper is already running"}
+    except Exception as e:
+        logger.error(f"Error starting/resuming scheduler: {e}")
+        return {"success": False, "message": f"Error: {e}"}
+
+
+@app.post("/api/scraper/stop")
+async def stop_scraper():
+    """Pause the scraping scheduler (does NOT shut it down — that would
+    make a later Start impossible). Currently-running jobs finish on their
+    own; pausing only prevents the scheduler from kicking off new ones."""
+    scheduler = get_scheduler()
+    aps = scheduler.scheduler
+    try:
+        if not scheduler.is_running:
+            return {"success": False, "message": "Scraper is already stopped"}
+        if aps.state == 1:  # STATE_RUNNING
+            aps.pause()
+            logger.info("Scraper paused via dashboard")
+            return {"success": True, "message": "Scraper paused"}
+        return {"success": False, "message": "Scraper is not running"}
+    except Exception as e:
+        logger.error(f"Error pausing scheduler: {e}")
+        return {"success": False, "message": f"Error: {e}"}
+
+
+@app.post("/api/scraper/restart")
+async def restart_scraper():
+    """Restart the scraping scheduler and force an immediate scrape run."""
+    scheduler = get_scheduler()
+    try:
+        logger.info("Restarting scraper scheduler via dashboard...")
+        if scheduler.is_running:
+            scheduler.stop(wait=False)
+            # Give it a brief moment to stabilize
+            await asyncio.sleep(1.5)
+        
+        # Start the scheduler (re-registers jobs and triggers run_initial_scrape)
+        scheduler.start()
+        logger.info("Scraper scheduler restarted successfully via dashboard")
+        return {"success": True, "message": "Scraper restarted successfully. Scraping will begin shortly."}
+    except Exception as e:
+        logger.error(f"Error restarting scheduler: {e}")
+        return {"success": False, "message": f"Error: {e}"}
+
+
+@app.get("/api/settings")
+async def get_dashboard_settings():
+    """Get current configuration from settings object"""
+    return {
+        "cities": settings.cities,
+        "max_price": settings.max_price,
+        "min_rooms": settings.min_rooms,
+        "max_rooms": settings.max_rooms,
+        "min_size_sqm": settings.min_size_sqm,
+        "require_mamad": settings.require_mamad,
+        "yad2_interval": settings.yad2_interval_minutes,
+        "madlan_interval": settings.madlan_interval_minutes,
+        "facebook_interval": settings.facebook_interval_minutes,
+        "min_deal_score": settings.min_deal_score_for_noti
+    }
+
+
+@app.post("/api/settings")
+async def update_dashboard_settings(data: dict):
+    """Update settings in .env and refresh running settings object"""
+    env_path = ".env"
+    
+    # Update .env file
+    if "cities" in data:
+        set_key(env_path, "CITIES", data["cities"])
+        settings.cities = data["cities"]
+    if "max_price" in data:
+        set_key(env_path, "MAX_PRICE", str(data["max_price"]))
+        settings.max_price = float(data["max_price"])
+    if "min_rooms" in data:
+        set_key(env_path, "MIN_ROOMS", str(data["min_rooms"]))
+        settings.min_rooms = float(data["min_rooms"])
+    if "max_rooms" in data:
+        val = str(data["max_rooms"]) if data["max_rooms"] is not None else ""
+        set_key(env_path, "MAX_ROOMS", val)
+        settings.max_rooms = float(data["max_rooms"]) if data["max_rooms"] else None
+    if "min_size_sqm" in data:
+        set_key(env_path, "MIN_SIZE_SQM", str(data["min_size_sqm"]))
+        settings.min_size_sqm = float(data["min_size_sqm"])
+    if "require_mamad" in data:
+        val = "true" if data["require_mamad"] else "false"
+        set_key(env_path, "REQUIRE_MAMAD", val)
+        settings.require_mamad = bool(data["require_mamad"])
+    if "yad2_interval" in data:
+        set_key(env_path, "YAD2_INTERVAL_MINUTES", str(data["yad2_interval"]))
+        settings.yad2_interval_minutes = int(data["yad2_interval"])
+    if "madlan_interval" in data:
+        set_key(env_path, "MADLAN_INTERVAL_MINUTES", str(data["madlan_interval"]))
+        settings.madlan_interval_minutes = int(data["madlan_interval"])
+    if "facebook_interval" in data:
+        set_key(env_path, "FACEBOOK_INTERVAL_MINUTES", str(data["facebook_interval"]))
+        settings.facebook_interval_minutes = int(data["facebook_interval"])
+    if "min_deal_score" in data:
+        set_key(env_path, "MIN_DEAL_SCORE_FOR_NOTI", str(data["min_deal_score"]))
+        set_key(env_path, "MIN_DEAL_SCORE_NOTIFY", str(data["min_deal_score"]))
+        settings.min_deal_score_for_noti = float(data["min_deal_score"])
+        settings.min_deal_score_notify = float(data["min_deal_score"])
+
+    logger.info("Settings updated via dashboard")
+    
+    # Optionally restart scheduler jobs to apply new intervals
+    try:
+        scheduler = get_scheduler()
+        if scheduler.is_running:
+            logger.info("Restarting scheduler to apply new settings...")
+            scheduler.stop(wait=False)
+            # Give it a moment to stabilize
+            await asyncio.sleep(1)
+            scheduler.start()
+            logger.info("Scheduler restarted successfully")
+    except Exception as e:
+        logger.error(f"Error restarting scheduler: {e}")
+        # Even if restart fails, we want to return success for the settings save
+        return {"success": True, "message": "Settings saved, but scheduler restart failed. Please restart the app manually if needed."}
+
+    return {"success": True, "message": "Settings updated and scheduler restarted"}
+

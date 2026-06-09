@@ -23,9 +23,11 @@ class TelegramNotifier:
             logger.warning("Telegram is not configured. Notifications disabled.")
             self.bot = None
             self.chat_id = None
+            self.message_thread_id = None
         else:
             self.bot = Bot(token=settings.telegram_bot_token)
             self.chat_id = settings.telegram_chat_id
+            self.message_thread_id = settings.telegram_message_thread_id
     
     async def notify_new_listing(self, listing: Listing) -> bool:
         """Send notification for a new listing"""
@@ -118,15 +120,23 @@ class TelegramNotifier:
             return False
         
         if notification_type == 'new_listing':
-            # Notify if high score
+            # Always notify if it's a high score
             if listing.deal_score >= settings.min_deal_score_notify:
                 return True
             
-            # Notify if in high priority neighborhood
+            # Always notify if it's in a high priority neighborhood
             high_priority = settings.get_high_priority_neighborhoods_list()
-            if listing.neighborhood in high_priority:
+            # Normalize neighborhood for comparison
+            listing_nb = (listing.neighborhood or "").strip()
+            if listing_nb and any(hp.strip() in listing_nb for hp in high_priority):
                 return True
             
+            # For other listings, notify if they have at least a decent score (e.g., 50)
+            # or if the user hasn't specified a high threshold.
+            if listing.deal_score >= 50:
+                return True
+            
+            logger.info(f"Skipping notification for listing {listing.id} (Score: {listing.deal_score:.1f}, Neighborhood: {listing.neighborhood}) - below threshold")
             return False
         
         return True
@@ -236,6 +246,7 @@ class TelegramNotifier:
         try:
             await self.bot.send_message(
                 chat_id=self.chat_id,
+                message_thread_id=self.message_thread_id,
                 text=message,
                 parse_mode='Markdown',
                 disable_web_page_preview=False
@@ -262,6 +273,117 @@ class TelegramNotifier:
         self.db.commit()
 
 
+_ERROR_STATES = {}
+_CAPTCHA_STATES = {}
+
+def notify_captcha_blocked(source: str) -> None:
+    """Fire-and-forget Telegram alert when a scraper is blocked by CAPTCHA."""
+    if not settings.is_telegram_enabled():
+        return
+    
+    if _CAPTCHA_STATES.get(source):
+        return  # Already notified
+
+    _CAPTCHA_STATES[source] = True
+    
+    message = f"🚨 *CAPTCHA detected* - {source}"
+
+    async def _send():
+        try:
+            bot = Bot(token=settings.telegram_bot_token)
+            await bot.send_message(
+                chat_id=settings.telegram_chat_id,
+                message_thread_id=settings.telegram_message_thread_id,
+                text=message,
+                parse_mode='Markdown',
+            )
+            logger.info(f"CAPTCHA Telegram alert sent for {source}")
+        except Exception as e:
+            logger.error(f"CAPTCHA Telegram alert failed: {e}")
+
+    import threading
+    def _run():
+        try:
+            asyncio.run(_send())
+        except Exception as e:
+            logger.error(f"CAPTCHA alert thread error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def notify_scraper_error(source: str, error_msg: str) -> None:
+    """Fire-and-forget Telegram alert when a scraper fails (retries exhausted, Chrome down, etc.)."""
+    if not settings.is_telegram_enabled():
+        return
+
+    if _ERROR_STATES.get(source):
+        return  # Already notified
+
+    _ERROR_STATES[source] = True
+
+    # Truncate very long error messages
+    short_error = error_msg[:300] if len(error_msg) > 300 else error_msg
+
+    message = f"🛑 *Scraper Error* - {source}"
+
+    async def _send():
+        try:
+            bot = Bot(token=settings.telegram_bot_token)
+            await bot.send_message(
+                chat_id=settings.telegram_chat_id,
+                message_thread_id=settings.telegram_message_thread_id,
+                text=message,
+                parse_mode='Markdown',
+            )
+            logger.info(f"Scraper-error Telegram alert sent for {source}")
+        except Exception as e:
+            logger.error(f"Scraper-error Telegram alert failed: {e}")
+
+    import threading
+    def _run():
+        try:
+            asyncio.run(_send())
+        except Exception as e:
+            logger.error(f"Scraper-error alert thread error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def clear_scraper_status(source: str) -> None:
+    """Clear error and captcha states and send a recovery notification if needed."""
+    recovered = False
+    
+    if _ERROR_STATES.get(source):
+        _ERROR_STATES[source] = False
+        recovered = True
+        
+    if _CAPTCHA_STATES.get(source):
+        _CAPTCHA_STATES[source] = False
+        recovered = True
+        
+    if recovered and settings.is_telegram_enabled():
+        message = f"✅ *{source.capitalize()}* cleared - resuming"
+
+        async def _send():
+            try:
+                bot = Bot(token=settings.telegram_bot_token)
+                await bot.send_message(
+                    chat_id=settings.telegram_chat_id,
+                    message_thread_id=settings.telegram_message_thread_id,
+                    text=message,
+                    parse_mode='Markdown',
+                )
+                logger.info(f"Scraper recovery Telegram alert sent for {source}")
+            except Exception as e:
+                logger.error(f"Scraper recovery Telegram alert failed: {e}")
+
+        import threading
+        def _run():
+            try:
+                asyncio.run(_send())
+            except Exception as e:
+                logger.error(f"Scraper recovery alert thread error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+
 async def send_test_notification(db_session: Session):
     """Send a test notification to verify Telegram is working"""
     notifier = TelegramNotifier(db_session)
@@ -286,6 +408,7 @@ Happy house hunting! 🏡
     try:
         await notifier.bot.send_message(
             chat_id=notifier.chat_id,
+            message_thread_id=notifier.message_thread_id,
             text=message,
             parse_mode='Markdown'
         )

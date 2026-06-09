@@ -38,6 +38,15 @@ class Listing(Base):
     has_parking = Column(Boolean, default=False)
     has_balcony = Column(Boolean, default=False)
     has_mamad = Column(Boolean, default=False)
+    has_miklat = Column(Boolean, default=False)
+
+    # Geocoding + transit
+    latitude = Column(Float)
+    longitude = Column(Float)
+    geocoded_at = Column(DateTime)
+    nearest_station_name = Column(String(200))
+    nearest_station_meters = Column(Float)
+    nearest_station_type = Column(String(30))  # heavy_rail, light_rail, subway, tram
 
     # Price
     price = Column(Float, index=True)
@@ -48,6 +57,10 @@ class Listing(Base):
     contact_phone = Column(String(50), index=True)
 
     # Metadata
+    # posted_at: when the listing was published on the source site (parsed from
+    # relative-time strings like "לפני 3 שעות" / "Listed 2 days ago"). Nullable —
+    # many cards don't surface it, and we show "unknown" in the UI in that case.
+    posted_at = Column(DateTime, nullable=True)
     first_seen = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.utcnow)
     last_checked = Column(DateTime, default=datetime.utcnow)
@@ -58,6 +71,7 @@ class Listing(Base):
 
     # Deal Score
     deal_score = Column(Float, default=0.0, index=True)
+    score_breakdown_json = Column(Text)  # JSON: per-component points breakdown
 
     # Images
     images_json = Column(Text)  # JSON array of image URLs
@@ -89,6 +103,17 @@ class Listing(Base):
         """Set images from list"""
         self.images_json = json.dumps(images_list)
 
+    def get_score_breakdown(self):
+        if self.score_breakdown_json:
+            try:
+                return json.loads(self.score_breakdown_json)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def set_score_breakdown(self, breakdown):
+        self.score_breakdown_json = json.dumps(breakdown) if breakdown else None
+
     def to_dict(self):
         """Convert to dictionary for API/template use"""
         return {
@@ -109,15 +134,19 @@ class Listing(Base):
             'has_elevator': self.has_elevator,
             'has_parking': self.has_parking,
             'has_balcony': self.has_balcony,
+            'has_mamad': self.has_mamad,
+            'has_miklat': self.has_miklat,
             'price': self.price,
             'price_per_sqm': self.price_per_sqm,
             'contact_name': self.contact_name,
             'contact_phone': self.contact_phone,
+            'posted_at': self.posted_at.isoformat() if self.posted_at else None,
             'first_seen': self.first_seen.isoformat() if self.first_seen else None,
             'last_seen': self.last_seen.isoformat() if self.last_seen else None,
             'status': self.status,
             'user_note': self.user_note,
             'deal_score': self.deal_score,
+            'score_breakdown': self.get_score_breakdown(),
             'images': self.get_images(),
         }
 
@@ -203,5 +232,33 @@ def init_db(database_url):
     """Initialize database and create all tables"""
     engine = create_engine(database_url, echo=False)
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     SessionLocal = sessionmaker(bind=engine)
     return engine, SessionLocal
+
+
+def _add_missing_columns(engine):
+    """Additive, idempotent column migrations for SQLite."""
+    from sqlalchemy import text, inspect
+    inspector = inspect(engine)
+    try:
+        cols = {c["name"] for c in inspector.get_columns("listings")}
+    except Exception:
+        return
+    if "score_breakdown_json" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE listings ADD COLUMN score_breakdown_json TEXT"))
+    if "has_miklat" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE listings ADD COLUMN has_miklat BOOLEAN DEFAULT 0"))
+    for col, ddl in (
+        ("latitude", "ALTER TABLE listings ADD COLUMN latitude FLOAT"),
+        ("longitude", "ALTER TABLE listings ADD COLUMN longitude FLOAT"),
+        ("geocoded_at", "ALTER TABLE listings ADD COLUMN geocoded_at DATETIME"),
+        ("nearest_station_name", "ALTER TABLE listings ADD COLUMN nearest_station_name VARCHAR(200)"),
+        ("nearest_station_meters", "ALTER TABLE listings ADD COLUMN nearest_station_meters FLOAT"),
+        ("nearest_station_type", "ALTER TABLE listings ADD COLUMN nearest_station_type VARCHAR(30)"),
+    ):
+        if col not in cols:
+            with engine.begin() as conn:
+                conn.execute(text(ddl))

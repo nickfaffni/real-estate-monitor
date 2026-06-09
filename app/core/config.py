@@ -17,15 +17,18 @@ class Settings(BaseSettings):
     # Telegram
     telegram_bot_token: Optional[str] = Field(default=None, env="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = Field(default=None, env="TELEGRAM_CHAT_ID")
+    telegram_message_thread_id: Optional[str] = Field(default=None, env="TELEGRAM_MESSAGE_THREAD_ID")
 
     # Dashboard
     dashboard_host: str = Field(default="127.0.0.1", env="DASHBOARD_HOST")
     dashboard_port: int = Field(default=8000, env="DASHBOARD_PORT")
 
     # Search Filters
+    listing_type: str = Field(default="rent", env="LISTING_TYPE")  # "rent" or "sale"
     cities: str = Field(default="תל אביב-יפו,רמת גן,גבעתיים", env="CITIES")
     max_price: float = Field(default=3000000, env="MAX_PRICE")  # For sale properties (₪3M)
     min_rooms: float = Field(default=2.5, env="MIN_ROOMS")
+    max_rooms: Optional[float] = Field(default=None, env="MAX_ROOMS")
     min_size_sqm: float = Field(default=65, env="MIN_SIZE_SQM")
 
     # High Priority
@@ -43,6 +46,7 @@ class Settings(BaseSettings):
     prefer_elevator: bool = Field(default=True, env="PREFER_ELEVATOR")
     prefer_top_floors: bool = Field(default=True, env="PREFER_TOP_FLOORS")
     prefer_mamad: bool = Field(default=True, env="PREFER_MAMAD")
+    prefer_miklat: bool = Field(default=True, env="PREFER_MIKLAT")
 
     # Notifications
     min_deal_score_notify: float = Field(default=80, env="MIN_DEAL_SCORE_NOTIFY")
@@ -78,10 +82,11 @@ class Settings(BaseSettings):
     min_deal_score_for_noti: float = Field(default=80, env="MIN_DEAL_SCORE_FOR_NOTI")
 
     # Deal Score Weights (total should be 100)
-    deal_score_weight_price: float = Field(default=40.0, env="DEAL_SCORE_WEIGHT_PRICE")
-    deal_score_weight_features: float = Field(default=30.0, env="DEAL_SCORE_WEIGHT_FEATURES")
+    deal_score_weight_price: float = Field(default=35.0, env="DEAL_SCORE_WEIGHT_PRICE")
+    deal_score_weight_features: float = Field(default=25.0, env="DEAL_SCORE_WEIGHT_FEATURES")
     deal_score_weight_recency: float = Field(default=15.0, env="DEAL_SCORE_WEIGHT_RECENCY")
     deal_score_weight_price_trend: float = Field(default=15.0, env="DEAL_SCORE_WEIGHT_PRICE_TREND")
+    deal_score_weight_transit: float = Field(default=10.0, env="DEAL_SCORE_WEIGHT_TRANSIT")
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")

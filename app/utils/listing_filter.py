@@ -49,6 +49,10 @@ class ListingFilter:
         if not self._passes_rooms_filter(listing_data):
             return False, f"Rooms {listing_data.get('rooms')} below minimum {self.settings.min_rooms}"
 
+        # Max rooms filter
+        if not self._passes_max_rooms_filter(listing_data):
+            return False, f"Rooms {listing_data.get('rooms')} above maximum {self.settings.max_rooms}"
+
         # Size filter
         if not self._passes_size_filter(listing_data):
             return False, f"Size {listing_data.get('size_sqm')}m² below minimum {self.settings.min_size_sqm}m²"
@@ -97,6 +101,16 @@ class ListingFilter:
             return True  # No rooms specified, allow it
 
         return rooms >= self.settings.min_rooms
+
+    def _passes_max_rooms_filter(self, listing_data: Dict) -> bool:
+        """True if rooms are at or below the configured max (or no max / no rooms specified)."""
+        max_rooms = self.settings.max_rooms
+        if max_rooms is None:
+            return True
+        rooms = listing_data.get('rooms')
+        if not rooms:
+            return True
+        return rooms <= max_rooms
 
     def _passes_size_filter(self, listing_data: Dict) -> bool:
         """
@@ -173,7 +187,13 @@ class ListingFilter:
         if not allowed_cities:
             return True  # No city filter configured, allow all
 
-        return city in allowed_cities
+        # Yad2 prints "תל אביב יפו" (space) while Madlan/FB use "תל אביב-יפו" (hyphen).
+        # Normalize hyphens to spaces and collapse whitespace so they compare equal.
+        def _norm(s: str) -> str:
+            return " ".join(s.replace("-", " ").split())
+
+        norm_city = _norm(city)
+        return any(_norm(a) == norm_city for a in allowed_cities)
 
     def get_filter_summary(self) -> Dict[str, Any]:
         """

@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from app.core.database import Listing, PriceHistory, DescriptionHistory
 from app.core.deal_score import DealScoreCalculator
 from app.core.config import settings
+from app.core import transit
 from datetime import datetime
 import logging
 from typing import Dict, Optional, List
@@ -120,10 +121,13 @@ class ListingProcessor:
             has_elevator=listing_data.get('has_elevator', False),
             has_parking=listing_data.get('has_parking', False),
             has_balcony=listing_data.get('has_balcony', False),
+            has_mamad=listing_data.get('has_mamad', False),
+            has_miklat=listing_data.get('has_miklat', False),
             price=listing_data.get('price'),
             price_per_sqm=listing_data.get('price_per_sqm'),
             contact_name=listing_data.get('contact_name'),
             contact_phone=normalize_israeli_phone(listing_data.get('contact_phone')),
+            posted_at=listing_data.get('posted_at'),
             first_seen=datetime.utcnow(),
             last_seen=datetime.utcnow(),
             last_checked=datetime.utcnow(),
@@ -134,8 +138,14 @@ class ListingProcessor:
         if listing_data.get('images'):
             listing.set_images(listing_data['images'])
 
+        # Geocode + nearest-station (best-effort; failures stamp geocoded_at so
+        # we don't retry on every scrape).
+        self._resolve_transit(listing)
+
         # Calculate deal score
-        listing.deal_score = self.deal_calculator.calculate_score(listing)
+        score, breakdown = self.deal_calculator.calculate_score_with_breakdown(listing)
+        listing.deal_score = score
+        listing.set_score_breakdown(breakdown)
 
         self.db.add(listing)
         self.db.flush()
@@ -227,9 +237,33 @@ class ListingProcessor:
         if listing_data.get('title'):
             listing.title = listing_data['title']
 
+        # Fill images if we now have some and the stored row doesn't
+        new_images = listing_data.get('images') or []
+        if new_images and not listing.get_images():
+            listing.set_images(new_images)
+
+        # posted_at: backfill only. If the first scrape missed the relative-time
+        # string but a later one finds it, record it. Don't overwrite — subsequent
+        # "3h ago" readings are just drift relative to the original publish time.
+        if listing.posted_at is None and listing_data.get('posted_at'):
+            listing.posted_at = listing_data['posted_at']
+
+        # Features: accumulate True across scrapes. A later scrape that happens
+        # to miss the amenity (compact card view, truncated text) must not
+        # silently downgrade a field the earlier scrape already confirmed.
+        for field in ('has_elevator', 'has_parking', 'has_balcony', 'has_mamad', 'has_miklat'):
+            if listing_data.get(field) and not getattr(listing, field):
+                setattr(listing, field, True)
+
+        # Resolve transit lazily — only if we've never tried before.
+        if listing.geocoded_at is None:
+            self._resolve_transit(listing)
+
         # Recalculate deal score
         old_score = listing.deal_score
-        listing.deal_score = self.deal_calculator.calculate_score(listing)
+        score, breakdown = self.deal_calculator.calculate_score_with_breakdown(listing)
+        listing.deal_score = score
+        listing.set_score_breakdown(breakdown)
 
         if price_changed:
             logger.info(f"[Listing Processor] Listing updated with price change, id: {listing.id}, title: {listing.title[:50]}, score_change: {old_score:.1f} → {listing.deal_score:.1f}")
@@ -241,4 +275,13 @@ class ListingProcessor:
         else:
             logger.debug(f"[Listing Processor] Duplicate listing (no changes), id: {listing.id}")
             return 'duplicates'
+
+    def _resolve_transit(self, listing: Listing):
+        """Geocode + find nearest station. Best-effort, never raises."""
+        try:
+            fields = transit.resolve_for_listing(listing)
+            for k, v in fields.items():
+                setattr(listing, k, v)
+        except Exception as e:
+            logger.warning(f"[Listing Processor] transit resolve failed for {getattr(listing, 'id', '?')}: {e}")
 

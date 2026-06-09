@@ -33,6 +33,14 @@ class ScrapingScheduler:
         """Start the scheduler"""
         logger.info("[Scheduler] Starting scraping scheduler...")
 
+        # Re-initialize executor if it was shut down or doesn't exist
+        try:
+            # Check if executor is shut down by trying to submit a dummy task
+            self.executor.submit(lambda: None)
+        except (RuntimeError, AttributeError):
+            logger.info("[Scheduler] Re-initializing ThreadPoolExecutor")
+            self.executor = ThreadPoolExecutor(max_workers=3)
+
         # Schedule Yad2
         logger.info(f"[Scheduler] Scheduling Yad2 scraper, interval: {settings.yad2_interval_minutes} minutes")
         self.scheduler.add_job(
@@ -154,6 +162,11 @@ class ScrapingScheduler:
 
         except Exception as e:
             logger.error(f"[Scheduler] Error in Yad2 scrape job, error: {e}")
+            try:
+                from app.services.telegram_notifier import notify_scraper_error
+                notify_scraper_error('yad2', str(e))
+            except Exception:
+                pass
         finally:
             db.close()
             logger.info("[Scheduler] Yad2 scrape job finished")
@@ -204,6 +217,11 @@ class ScrapingScheduler:
 
         except Exception as e:
             logger.error(f"[Scheduler] Error in Madlan scrape job, error: {e}")
+            try:
+                from app.services.telegram_notifier import notify_scraper_error
+                notify_scraper_error('madlan', str(e))
+            except Exception:
+                pass
         finally:
             db.close()
             logger.info("[Scheduler] Madlan scrape job finished")
@@ -255,6 +273,11 @@ class ScrapingScheduler:
 
         except Exception as e:
             logger.error(f"[Scheduler] Error in Facebook scrape job, error: {e}")
+            try:
+                from app.services.telegram_notifier import notify_scraper_error
+                notify_scraper_error('facebook', str(e))
+            except Exception:
+                pass
         finally:
             db.close()
             logger.info("[Scheduler] Facebook scrape job finished")
@@ -284,11 +307,14 @@ class ScrapingScheduler:
 
             notifier = TelegramNotifier(db)
 
-            # Get recent new listings (last 5 minutes)
+            # Get recent new listings (last 60 minutes) to ensure we don't miss any during long scrapes
+            lookback_minutes = 60
             recent_listings = db.query(Listing).filter(
-                Listing.first_seen > datetime.utcnow() - timedelta(minutes=5),
+                Listing.first_seen > datetime.utcnow() - timedelta(minutes=lookback_minutes),
                 Listing.status == 'unseen'
             ).all()
+
+            logger.info(f"[Scheduler] Found {len(recent_listings)} unseen listings in the last {lookback_minutes} minutes")
 
             for listing in recent_listings:
                 # Try to notify
@@ -300,9 +326,9 @@ class ScrapingScheduler:
                 # Small delay between notifications
                 await asyncio.sleep(1)
 
-            # Check for price drops
+            # Check for price drops in listings seen recently
             price_drop_listings = db.query(Listing).filter(
-                Listing.last_seen > datetime.utcnow() - timedelta(minutes=5)
+                Listing.last_seen > datetime.utcnow() - timedelta(minutes=lookback_minutes)
             ).all()
 
             for listing in price_drop_listings:
@@ -312,17 +338,21 @@ class ScrapingScheduler:
         except Exception as e:
             logger.error(f"Error sending notifications: {e}")
 
-    def stop(self):
+    def stop(self, wait=True):
         """Stop the scheduler"""
         if not self.is_running:
             return
 
-        logger.info("Stopping scraping scheduler...")
+        logger.info(f"Stopping scraping scheduler (wait={wait})...")
         try:
-            # Shutdown executor
-            self.executor.shutdown(wait=True)
-            # Shutdown scheduler with a short wait to allow jobs to finish gracefully
-            self.scheduler.shutdown(wait=True)
+            # Shutdown scheduler
+            self.scheduler.shutdown(wait=wait)
+            
+            # Only shutdown executor if we are not planning to restart soon
+            # or if wait is True (indicating a full app shutdown)
+            if wait:
+                logger.info("Shutting down ThreadPoolExecutor...")
+                self.executor.shutdown(wait=wait)
         except Exception as e:
             logger.error(f"Error stopping scheduler: {e}")
         finally:

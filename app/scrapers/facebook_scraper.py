@@ -1,11 +1,36 @@
 from app.scrapers.base_scraper import BaseScraper
 from typing import List, Dict, Optional
+from urllib.parse import quote
 import logging
 import re
 import json
 import os
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
+
+
+# Hebrew city name -> Facebook Marketplace location slug.
+# Unknown slugs cause FB to silently fall back to the account's IP location.
+FB_CITY_SLUGS = {
+    'תל אביב-יפו': 'telaviv',
+    'תל אביב': 'telaviv',
+    'רמת גן': 'ramatgan',
+    'גבעתיים': 'givatayim',
+    'הרצליה': 'herzliya',
+    'רמת השרון': 'ramathasharon',
+    'פתח תקווה': 'petahtikva',
+    'ראשון לציון': 'rishonlezion',
+    'הוד השרון': 'hodhasharon',
+    'כפר סבא': 'kfarsaba',
+    'רעננה': 'raanana',
+    'בצרה': 'basra',
+    'בני ציון': 'bneizion',
+    'צופית': 'tzofit',
+    'גן חיים': 'ganhaim',
+    'גבעת חן': 'givathen',
+}
 
 
 class FacebookScraper(BaseScraper):
@@ -22,127 +47,157 @@ class FacebookScraper(BaseScraper):
             logger.warning("Facebook cookies file not found. Facebook scraping may not work.")
             return
 
+        # Chrome exports use lowercase "no_restriction"/"lax"/"strict" or null;
+        # DrissionPage/CDP wants "None"/"Lax"/"Strict".
+        same_site_map = {
+            'no_restriction': 'None',
+            'unspecified': 'None',
+            'lax': 'Lax',
+            'strict': 'Strict',
+            'none': 'None',
+        }
+
         try:
             with open(self.cookies_file, 'r', encoding='utf-8') as f:
                 cookies = json.load(f)
 
-            if cookies and self.page:
-                for cookie in cookies:
-                    # Convert cookie format if needed
-                    if 'sameSite' in cookie:
-                        cookie['sameSite'] = cookie['sameSite'].capitalize()
+            if not cookies or not self.page:
+                return
+
+            loaded = 0
+            for cookie in cookies:
+                raw_ss = cookie.get('sameSite')
+                if raw_ss is None:
+                    cookie.pop('sameSite', None)
+                else:
+                    cookie['sameSite'] = same_site_map.get(str(raw_ss).lower(), 'None')
+                # Strip Chrome-export-only fields that CDP rejects.
+                for k in ('hostOnly', 'session', 'storeId'):
+                    cookie.pop(k, None)
+                try:
                     self.page.set.cookies(cookie)
-                logger.info("Loaded Facebook cookies from file")
+                    loaded += 1
+                except Exception as inner:
+                    logger.warning(f"[Facebook] skipping cookie {cookie.get('name')!r}: {inner}")
+            logger.info(f"Loaded {loaded}/{len(cookies)} Facebook cookies from file")
         except Exception as e:
             logger.warning(f"Failed to load Facebook cookies: {e}")
 
     def scrape(self) -> List[Dict]:
-        """Scrape Facebook Marketplace listings"""
+        """Scrape Facebook Marketplace listings across all configured cities."""
         if not self.page:
             logger.error("[Facebook Scraper] Browser page not initialized")
             return []
 
-        listings = []
+        listings: List[Dict] = []
+        seen_ids: set = set()
 
-        try:
-            # Navigate to Facebook Marketplace - search for apartments in Tel Aviv area
-            search_url = f"{self.base_url}/marketplace/telaviv/search?query=דירה%20להשכרה&exact=false"
-            logger.info(f"[Facebook Scraper] Navigating to search page, url: {search_url}")
+        configured_cities = settings.get_cities_list()
+        query = quote("דירה להשכרה")
 
-            # Navigate to the page
-            self.page.get(search_url)
-            logger.info("[Facebook Scraper] Page loaded successfully")
+        for city in configured_cities:
+            slug = FB_CITY_SLUGS.get(city)
+            if not slug:
+                logger.warning(f"[Facebook Scraper] No FB Marketplace slug mapped for city {city!r} — skipping")
+                continue
 
-            # Wait for page to settle
-            self.random_delay(2, 3)
+            search_url = f"{self.base_url}/marketplace/{slug}/search?query={query}&exact=false"
+            logger.info(f"[Facebook Scraper] Navigating to search page, city: {city}, url: {search_url}")
 
-            # Check for anti-bot protection (CAPTCHA, etc.)
-            self._handle_anti_bot_protection()
+            try:
+                self.page.get(search_url)
+                self.random_delay(2, 3)
+                self._handle_anti_bot_protection()
+                self.random_delay(4, 7)
 
-            # Longer initial delay to let anti-bot scripts run
-            self.random_delay(4, 7)
-            logger.debug("[Facebook Scraper] Initial delay completed")
+                current_url = self.page.url
+                logger.debug(f"[Facebook Scraper] Checking current URL, url: {current_url}")
 
-            # Check if login is required
-            current_url = self.page.url
-            logger.debug(f"[Facebook Scraper] Checking current URL, url: {current_url}")
+                if 'login' in current_url.lower():
+                    logger.warning("[Facebook Scraper] Login required - cookies missing or expired")
+                    return listings
 
-            if 'login' in current_url.lower():
-                logger.warning("[Facebook Scraper] Login required - cookies missing or expired")
-                return []
+                # Guard against FB silently redirecting to the account's home
+                # location when it doesn't recognize the slug.
+                if f"/marketplace/{slug}/" not in current_url:
+                    logger.warning(
+                        f"[Facebook Scraper] Post-navigation URL dropped slug {slug!r} "
+                        f"(now {current_url}); skipping {city}"
+                    )
+                    continue
 
-            # Simulate human-like mouse movements
-            self.human_like_mouse_movement()
-            logger.debug("[Facebook Scraper] Mouse movements simulated")
+                self.human_like_mouse_movement()
 
-            # Scroll to load more results with human-like behavior
-            logger.info("[Facebook Scraper] Scrolling page to load dynamic content, scrolls: 4")
-            self.scroll_page(scrolls=4)
-            self.random_delay(2, 4)
+                logger.info("[Facebook Scraper] Scrolling page to load dynamic content, scrolls: 4")
+                self.scroll_page(scrolls=4)
+                self.random_delay(2, 4)
 
-            # Get listing cards
-            logger.info("[Facebook Scraper] Attempting to find listing cards with selector: css:[data-testid=\"marketplace-feed-item\"]")
-            listing_cards = self.page.eles('css:[data-testid="marketplace-feed-item"]')
+                logger.info('[Facebook Scraper] Attempting to find listing cards with selector: css:a[href^="/marketplace/item/"]')
+                listing_cards = self.page.eles('css:a[href^="/marketplace/item/"]')
 
-            if not listing_cards:
-                logger.info("[Facebook Scraper] Primary selector failed, trying alternative: css:div[role=\"article\"]")
-                listing_cards = self.page.eles('css:div[role="article"]')
-
-            if not listing_cards:
-                logger.info("[Facebook Scraper] Second selector failed, trying: css:[class*=\"marketplace\"]")
-                listing_cards = self.page.eles('css:[class*="marketplace"]')
-
-            if not listing_cards:
-                logger.info("[Facebook Scraper] Third selector failed, trying generic: css:div[class*=\"feed\"] > div")
-                listing_cards = self.page.eles('css:div[class*="feed"] > div')
                 if not listing_cards:
-                    listing_cards = self.page.eles('css:div[class*="item"]')
+                    logger.info("[Facebook Scraper] Primary selector failed, trying alternative: css:div[role=\"article\"]")
+                    listing_cards = self.page.eles('css:div[role="article"]')
 
-            logger.info(f"[Facebook Scraper] Found listing cards, count: {len(listing_cards)}")
+                logger.info(f"[Facebook Scraper] Found listing cards, city: {city}, count: {len(listing_cards)}")
 
-            # Debug: Save page if no listings found
-            if len(listing_cards) == 0:
-                logger.warning("[Facebook Scraper] No listing cards found - saving debug output")
-                self.debug_save_page("no_listings")
+                if len(listing_cards) == 0:
+                    logger.warning(f"[Facebook Scraper] No listing cards found for {city} - saving debug output")
+                    self.debug_save_page(f"no_listings_{slug}")
+                    continue
 
-            # Process listings
-            max_listings = min(len(listing_cards), 30)
-            logger.info(f"[Facebook Scraper] Processing listings, max_count: {max_listings}")
+                max_listings = min(len(listing_cards), 30)
+                logger.info(f"[Facebook Scraper] Processing listings, city: {city}, max_count: {max_listings}")
 
-            for idx, card in enumerate(listing_cards[:30], 1):
-                try:
-                    logger.debug(f"[Facebook Scraper] Extracting listing data, index: {idx}/{max_listings}")
-                    listing_data = self._extract_listing_data(card)
-                    if listing_data:
+                raw_cards = []
+                for idx, card in enumerate(listing_cards[:30], 1):
+                    try:
+                        listing_data = self._extract_listing_data(card)
+                        if listing_data:
+                            raw_cards.append(listing_data)
+                    except Exception as e:
+                        logger.warning(f"[Facebook Scraper] Error extracting listing, index: {idx}, error: {e}")
+                        continue
+
+                for idx, listing_data in enumerate(raw_cards, 1):
+                    try:
+                        ext_id = listing_data.get('external_id')
+                        if ext_id and ext_id in seen_ids:
+                            continue
+                        price = listing_data.get('price') or 0
+                        too_expensive = settings.max_price and price > settings.max_price
+                        if ext_id and not self.listing_exists(ext_id) and not too_expensive:
+                            detail_url = listing_data.get('url')
+                            logger.debug(f"[Facebook Scraper] New listing, fetching detail: {detail_url}")
+                            listing_data['detail_text'] = self.fetch_detail_text(detail_url)
+                            self.random_delay(1.5, 3)
+                        elif too_expensive:
+                            logger.debug(f"[Facebook Scraper] Skipping detail fetch — price {price} > max {settings.max_price}")
                         parsed = self.parse_listing(listing_data)
                         if parsed:
                             listings.append(parsed)
-                            logger.debug(f"[Facebook Scraper] Successfully parsed listing, title: {parsed.get('title', 'N/A')[:50]}")
-                        else:
-                            logger.debug(f"[Facebook Scraper] Failed to parse listing data, index: {idx}")
-                    else:
-                        logger.debug(f"[Facebook Scraper] Failed to extract listing data, index: {idx}")
-                except Exception as e:
-                    logger.warning(f"[Facebook Scraper] Error extracting listing, index: {idx}, error: {e}")
-                    continue
+                            if ext_id:
+                                seen_ids.add(ext_id)
+                    except Exception as e:
+                        logger.warning(f"[Facebook Scraper] Error parsing listing, index: {idx}, error: {e}")
+                        continue
 
-            logger.info(f"[Facebook Scraper] Scraping completed, total_listings: {len(listings)}")
+            except Exception as e:
+                logger.error(f"[Facebook Scraper] Error scraping city {city}: {e}")
+                continue
 
-        except Exception as e:
-            logger.error(f"[Facebook Scraper] Fatal error during scraping, error: {e}")
-            raise
-
+        logger.info(f"[Facebook Scraper] Scraping completed, total_listings: {len(listings)}")
         return listings
 
     def _extract_listing_data(self, card) -> Optional[Dict]:
         """Extract data from a single Facebook listing card"""
         try:
-            # Extract link
-            link_element = card.ele('tag:a', timeout=2)
-            if not link_element:
-                return None
-
-            href = link_element.link
+            # Current live DOM: the card IS an anchor (role=link, href=/marketplace/item/<id>/...)
+            # so read href directly before falling back to a nested <a>.
+            href = card.attr('href')
+            if not href:
+                link_element = card.ele('tag:a', timeout=2)
+                href = link_element.link if link_element else None
             if not href:
                 return None
 
@@ -185,6 +240,15 @@ class FacebookScraper(BaseScraper):
                 if src and 'http' in src:
                     images.append(src)
 
+            try:
+                card_html = card.html or ''
+            except Exception:
+                card_html = ''
+
+            # Facebook renders "Listed X hours ago" / "Listed 2 days ago" in
+            # card text. parse_relative_time handles both English and Hebrew.
+            posted_at = self.parse_relative_time(card_text)
+
             return {
                 'external_id': external_id,
                 'url': full_url,
@@ -198,6 +262,8 @@ class FacebookScraper(BaseScraper):
                 'street': street,
                 'location_text': '',
                 'details_text': card_text,
+                'card_html': card_html,
+                'posted_at': posted_at,
                 'contact_name': '',
                 'contact_phone': '',
                 'images': images
@@ -215,14 +281,13 @@ class FacebookScraper(BaseScraper):
             if raw_data.get('price') and raw_data.get('size_sqm') and raw_data['size_sqm'] > 0:
                 price_per_sqm = raw_data['price'] / raw_data['size_sqm']
 
-            # Detect features from text
-            details_lower = raw_data.get('details_text', '').lower()
-
-            has_elevator = any(word in details_lower for word in ['מעלית', 'elevator'])
-            has_parking = any(word in details_lower for word in ['חניה', 'parking', 'חנייה'])
-            has_balcony = any(word in details_lower for word in ['מרפסת', 'balcony', 'mirpeset'])
-            has_mamad = any(word in details_lower for word in ['ממ"ד', 'ממד', 'mamad', 'מרחב מוגן', 'מקלט'])
-
+            haystack = ' '.join([
+                raw_data.get('details_text', '') or '',
+                raw_data.get('title', '') or '',
+                raw_data.get('detail_text', '') or '',
+                raw_data.get('card_html', '') or '',
+            ])
+            features = self.extract_features(haystack)
 
             return {
                 'source': 'facebook',
@@ -239,10 +304,8 @@ class FacebookScraper(BaseScraper):
                 'floor': raw_data.get('floor'),
                 'price': raw_data.get('price'),
                 'price_per_sqm': price_per_sqm,
-                'has_elevator': has_elevator,
-                'has_parking': has_parking,
-                'has_balcony': has_balcony,
-                'has_mamad': has_mamad,
+                'posted_at': raw_data.get('posted_at'),
+                **features,
                 'contact_name': raw_data.get('contact_name'),
                 'contact_phone': raw_data.get('contact_phone'),
                 'images': raw_data.get('images', [])
@@ -293,11 +356,14 @@ class FacebookScraper(BaseScraper):
 
     def _extract_location_from_text(self, text: str) -> tuple:
         """Extract location information from text"""
-        # Common Israeli cities
+        # Longer names first so 'תל אביב-יפו' wins before its prefix 'תל אביב' can match.
         cities = [
-            'תל אביב', 'תל אביב-יפו', 'רמת גן', 'גבעתיים',
-            'הרצליה', 'רמת השרון', 'פתח תקווה', 'ראשון לציון'
+            'תל אביב-יפו', 'תל אביב', 'רמת גן', 'גבעתיים',
+            'הרצליה', 'רמת השרון', 'פתח תקווה', 'ראשון לציון',
+            'הוד השרון', 'כפר סבא', 'רעננה',
         ]
+        # Map FB's short form to the canonical form used elsewhere in the app.
+        city_aliases = {'תל אביב': 'תל אביב-יפו'}
 
         city = None
         neighborhood = None
@@ -306,13 +372,16 @@ class FacebookScraper(BaseScraper):
         # Find city
         for c in cities:
             if c in text:
-                city = c
+                city = city_aliases.get(c, c)
                 break
 
-        # Common neighborhoods in Tel Aviv (example)
         neighborhoods = [
+            # Tel Aviv
             'רמת אביב', 'בבלי', 'יד אליהו', 'נווה אביבים',
-            'פלורנטין', 'נווה צדק', 'רמת החייל'
+            'פלורנטין', 'נווה צדק', 'רמת החייל',
+            # Priority areas the user asked for (Hod HaSharon / Kfar Saba / Herzliya / PT)
+            'גאולים', 'נווה הדרים', 'הדרים', 'השכונה הירוקה',
+            'מתחם 1200', 'מגדיאל', 'אם המושבות החדשה', 'אם המושבות',
         ]
 
         for n in neighborhoods:
