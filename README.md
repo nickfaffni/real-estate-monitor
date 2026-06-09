@@ -200,6 +200,12 @@ sqlite3 real_estate.db "SELECT city, COUNT(*) as count FROM listings GROUP BY ci
 
 # Add test data to see the dashboard in action
 python add_test_listings.py
+
+# Seed/Update transit stations data from OpenStreetMap
+python fetch_stations.py
+
+# Backfill image JSONs for existing Madlan listings
+python backfill_images.py
 ```
 
 ### Stopping the Application
@@ -217,11 +223,12 @@ python add_test_listings.py
 ### Core Functionality
 
 - ✅ **Automated Scraping** from Yad2, Madlan & Facebook Marketplace
-- ✅ **Intelligent Deal Scoring** (0-100 based on price, features, recency)
+- ✅ **Intelligent Deal Scoring** (0-100 based on price, features, recency, and transit proximity)
+- ✅ **Transit Proximity Analysis** - Geocodes addresses via Nominatim and resolves proximity to closest heavy rail/subway/light rail/tram station (via OpenStreetMap)
 - ✅ **Price Drop Detection** - Automatically re-surfaces good deals
 - ✅ **Cross-Site Duplicate Detection** - Avoid seeing the same listing twice
 - ✅ **Telegram Notifications** - Get instant alerts for hot deals
-- ✅ **Web Dashboard** - Beautiful UI to browse and manage listings
+- ✅ **Web Dashboard** - Beautiful custom UI to browse and manage listings
 - ✅ **Smart Filtering** - Must-have, nice-to-have, and deal-breakers
 - ✅ **Neighborhood Analytics** - Compare prices to local averages
 - ✅ **24/7 Local Operation** - No cloud, no subscriptions
@@ -229,11 +236,12 @@ python add_test_listings.py
 ### Dashboard Features
 
 - 📊 Real-time statistics (new today, high scores)
-- 🔍 Advanced filtering (city, neighborhood, score, price)
+- 🔍 Advanced filtering (city, neighborhood, transit proximity, score, price)
 - ❤️ Like/Hide/Contacted status tracking
 - 📈 Price history charts
 - 💬 One-click WhatsApp contact
-- 🎨 Responsive Bootstrap UI
+- 🎨 Custom CSS & JavaScript styling (glassmorphism details, transit distance badges)
+
 
 ---
 
@@ -424,50 +432,63 @@ Open [`http://127.0.0.1:8000`](http://127.0.0.1:8000) in your browser.
 
 ## 🧠 How Deal Scoring Works
 
-Each listing gets a score from 0-100 based on four factors:
+Each listing gets a score from 0-100 based on five configurable factors (configurable in `.env` via weights):
 
-### 1. Price Competitiveness (40 points max)
+### 1. Price Competitiveness (35 points max)
 
-Compared to neighborhood average:
+Compared to the neighborhood average price per square meter:
 
-- 30%+ below average = 40 points
-- 20% below average = 35 points
-- 10% below average = 30 points
-- At average = 25 points
-- 10% above average = 15 points
-- 20%+ above average = 5 points
+- 30%+ below average = 35 points (100% of weight)
+- 20% below average = ~30.6 points
+- 10% below average = ~26.25 points
+- At average = ~21.8 points
+- 10% above average = ~13.1 points
+- 20% above average = ~8.75 points
+- Worse than 20% above = ~4.4 points
 
-### 2. Features Match (30 points max)
+### 2. Features Match (25 points max)
 
-Based on your preferences:
+Based on matching your preference settings. Matches are scaled proportionally based on their configuration:
 
-- Parking (if preferred): 10 points
-- Balcony (if preferred): 8 points
-- Elevator (if preferred): 7 points
-- Mamad/safe room (if preferred): 8 points
-- Top floor (if preferred): 5 points
+- **Parking** (if preferred)
+- **Balcony** (if preferred)
+- **Elevator** (if preferred)
+- **Mamad / Safe Room** (if preferred)
+- **Miklat** (shared building shelter, if preferred and unit lacks Mamad)
+- **Top Floor** (if preferred and listing is in top half of floors)
 
 ### 3. Recency (15 points max)
 
-How fresh the listing is:
+How fresh the listing is since first indexed:
 
-- Today: 15 points
-- 1-2 days: 12 points
-- 3-5 days: 9 points
-- 6-10 days: 6 points
-- 11-20 days: 3 points
-- 20+ days: 1 point
+- Today: 15 points (100%)
+- 1-2 days old: 12 points (80%)
+- 3-5 days old: 9 points (60%)
+- 6-10 days old: 6 points (40%)
+- 11-20 days old: 3 points (20%)
+- 20+ days old: 1 point (6.7%)
 
 ### 4. Price Trend (15 points max)
 
-Price change history:
+Score based on price history changes:
 
-- 10%+ price drop: 15 points
-- 5-10% drop: 12 points
-- 2-5% drop: 9 points
-- Any drop: 7 points
-- No change: 5 points
-- Price increase: 2 points
+- 10%+ price drop: 15 points (100%)
+- 5-10% drop: 12 points (80%)
+- 2-5% drop: 9 points (60%)
+- Under 2% drop: 7 points (~47%)
+- No change: 5 points (~33%)
+- Price increase: 2 points (~13%)
+
+### 5. Transit Proximity (10 points max)
+
+Calculated via geocoded coordinates vs. closest public transport station from your `transit_stations.json` data:
+
+- **Station Type Weight**: Heavy Rail / Subway = 1.0, Light Rail / Tram = 0.85
+- **Distance Multiplier**:
+  - Within 500 meters = 1.0
+  - 500m to 1000m = 0.7
+  - 1000m to 1500m = 0.4
+  - Above 1500m / Not geocoded = 0.0
 
 ### Score Interpretation
 
@@ -477,6 +498,7 @@ Price change history:
 - **Below 40**: 👎 Below expectations
 
 ---
+
 
 ## 🧪 Testing
 
