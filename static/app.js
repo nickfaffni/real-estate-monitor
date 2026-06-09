@@ -662,7 +662,7 @@ function Sidebar({filters, setFilters, state, set, status}){
         <Field label="Cities">
           <div style={{marginBottom:8, display:'flex', gap:10}}>
             <button onClick={() => upd('city', cities.join(','))} style={{fontSize:11, color:'var(--ink)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Select All</button>
-            <button onClick={() => setFilters(f => ({...f, city: '', neighborhood: ''})) style={{fontSize:11, color:'var(--muted)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Clear All</button>
+            <button onClick={() => setFilters(f => ({...f, city: '', neighborhood: ''}))} style={{fontSize:11, color:'var(--muted)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Clear All</button>
           </div>
           <Select 
             value="" 
