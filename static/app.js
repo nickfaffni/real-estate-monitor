@@ -541,7 +541,7 @@ function useScraperStatus(){
 /* ---------- Dashboard ---------- */
 function Dashboard({state, set}){
   const [filters, setFilters] = useState(Object.assign({
-    status:'all', city:'', neighborhood:'', minScore:0, mamad:false, sort:'deal_score', q:''
+    status:'all', city:'', neighborhood:'', minScore:0, mamad:false, miklat:false, parking:false, elevator:false, balcony:false, sort:'deal_score', q:'', minPrice:'', maxPrice:'', source:''
   }, BOOTSTRAP.filters || {}));
   const [listings, setListings] = useState([]);
   const [statusMap, setStatusMap] = useState({});
@@ -602,6 +602,9 @@ function Dashboard({state, set}){
       if(filters.parking && !l.features.parking) return false;
       if(filters.elevator && !l.features.elevator) return false;
       if(filters.balcony && !l.features.balcony) return false;
+      if(filters.minPrice && l.price < parseFloat(filters.minPrice)) return false;
+      if(filters.maxPrice && l.price > parseFloat(filters.maxPrice)) return false;
+      if(filters.source && filters.source !== 'all' && l.source !== filters.source) return false;
       const effStatus = statusMap[l.id] || l.status || 'unseen';
       if(filters.status!=='all' && effStatus!==filters.status) return false;
       if(filters.q && !(l.he.includes(filters.q)||l.neighborhood.includes(filters.q)||l.city.includes(filters.q))) return false;
@@ -659,33 +662,47 @@ function Sidebar({filters, setFilters, state, set, status}){
         <Field label="Cities">
           <div style={{marginBottom:8, display:'flex', gap:10}}>
             <button onClick={() => upd('city', cities.join(','))} style={{fontSize:11, color:'var(--ink)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Select All</button>
-            <button onClick={() => setFilters(f => ({...f, city: '', neighborhood: ''}))} style={{fontSize:11, color:'var(--muted)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Clear All</button>
+            <button onClick={() => setFilters(f => ({...f, city: '', neighborhood: ''})) style={{fontSize:11, color:'var(--muted)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Clear All</button>
           </div>
-          <div style={{display:'flex', flexDirection:'column', gap:4, maxHeight:150, overflowY:'auto', padding:'8px 10px', border:'1px solid var(--line-2)', borderRadius:6, background:'var(--paper)'}}>
-            {cities.map(c => {
+          <Select 
+            value="" 
+            onChange={e => {
+              const c = e.target.value;
+              if (!c) return;
               const cityList = filters.city.split(',').map(x=>x.trim()).filter(Boolean);
-              const active = cityList.includes(c);
-              return (
-                <label key={c} style={{display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:13}}>
-                  <input type="checkbox" checked={active} onChange={e => {
-                    const next = e.target.checked ? [...cityList, c] : cityList.filter(x=>x!==c);
-                    
-                    // If de-selecting a city, also remove all its neighborhoods
-                    let nextNeighborhood = filters.neighborhood;
-                    if (!e.target.checked) {
-                      const hoodList = filters.neighborhood.split(',').map(x=>x.trim()).filter(Boolean);
-                      const cityHoods = hoods.filter(h => h.city === c).map(h => h.name);
-                      const filteredHoods = hoodList.filter(h => !cityHoods.includes(h));
-                      nextNeighborhood = filteredHoods.join(',');
-                    }
-                    
-                    setFilters(f => ({...f, city: next.join(','), neighborhood: nextNeighborhood}));
-                  }}/>
-                  <span className="he">{c}</span>
-                </label>
-              );
-            })}
-            {cities.length === 0 && <span style={{fontSize:12, color:'var(--muted)'}}>No cities found</span>}
+              if (!cityList.includes(c)) {
+                const next = [...cityList, c];
+                setFilters(f => ({...f, city: next.join(',')}));
+              }
+            }}
+          >
+            <option value="">Select City...</option>
+            {cities.map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </Select>
+          <div style={{display:'flex', flexWrap:'wrap', gap:6, marginTop:8}}>
+            {filters.city.split(',').map(x=>x.trim()).filter(Boolean).map(c => (
+              <span key={c} className="he" style={{
+                display:'inline-flex', alignItems:'center', gap:4, 
+                padding:'2px 8px', borderRadius:4, fontSize:12, 
+                background:'var(--ink)', color:'var(--paper)'
+              }}>
+                {c}
+                <span style={{cursor:'pointer', opacity:0.8, marginLeft:4}} onClick={() => {
+                  const cityList = filters.city.split(',').map(x=>x.trim()).filter(Boolean);
+                  const next = cityList.filter(x=>x!==c);
+                  
+                  let nextNeighborhood = filters.neighborhood;
+                  const hoodList = filters.neighborhood.split(',').map(x=>x.trim()).filter(Boolean);
+                  const cityHoods = hoods.filter(h => h.city === c).map(h => h.name);
+                  const filteredHoods = hoodList.filter(h => !cityHoods.includes(h));
+                  nextNeighborhood = filteredHoods.join(',');
+                  
+                  setFilters(f => ({...f, city: next.join(','), neighborhood: nextNeighborhood}));
+                }}>×</span>
+              </span>
+            ))}
           </div>
         </Field>
         <Field label="Neighborhoods">
@@ -700,36 +717,74 @@ function Sidebar({filters, setFilters, state, set, status}){
             })()}
             <button onClick={() => upd('neighborhood', '')} style={{fontSize:11, color:'var(--muted)', textDecoration:'underline', background:'none', border:'none', padding:0, cursor:'pointer'}}>Clear All</button>
           </div>
-          <div style={{display:'flex', flexDirection:'column', gap:4, maxHeight:200, overflowY:'auto', padding:'8px 10px', border:'1px solid var(--line-2)', borderRadius:6, background:'var(--paper)'}}>
+          <Select
+            value=""
+            onChange={e => {
+              const h = e.target.value;
+              if (!h) return;
+              const hoodList = filters.neighborhood.split(',').map(x=>x.trim()).filter(Boolean);
+              if (!hoodList.includes(h)) {
+                const next = [...hoodList, h];
+                upd('neighborhood', next.join(','));
+              }
+            }}
+          >
+            <option value="">Select Neighborhood...</option>
             {(() => {
               const cityList = filters.city.split(',').map(x=>x.trim()).filter(Boolean);
-              // Filter hoods by selected cities, or show all if no city is selected
               const filteredHoods = cityList.length > 0 
                 ? hoods.filter(h => cityList.includes(h.city))
                 : hoods;
               
-              // Get unique neighborhood names (in case they appear in multiple cities, though rare)
               const uniqueHoods = [...new Set(filteredHoods.map(h => h.name))].sort();
-
-              return uniqueHoods.map(h => {
-                const hoodList = filters.neighborhood.split(',').map(x=>x.trim()).filter(Boolean);
-                const active = hoodList.includes(h);
-                return (
-                  <label key={h} style={{display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:13}}>
-                    <input type="checkbox" checked={active} onChange={e => {
-                      const next = e.target.checked ? [...hoodList, h] : hoodList.filter(x=>x!==h);
-                      upd('neighborhood', next.join(','));
-                    }}/>
-                    <span className="he">{h}</span>
-                  </label>
-                );
-              });
+              return uniqueHoods.map(h => (
+                <option key={h} value={h}>{h}</option>
+              ));
             })()}
-            {hoods.length === 0 && <span style={{fontSize:12, color:'var(--muted)'}}>No neighborhoods found</span>}
-            {filters.city && hoods.filter(h => filters.city.split(',').includes(h.city)).length === 0 && (
-              <span style={{fontSize:12, color:'var(--muted)'}}>No neighborhoods in selected cities</span>
-            )}
+          </Select>
+          <div style={{display:'flex', flexWrap:'wrap', gap:6, marginTop:8}}>
+            {filters.neighborhood.split(',').map(x=>x.trim()).filter(Boolean).map(h => (
+              <span key={h} className="he" style={{
+                display:'inline-flex', alignItems:'center', gap:4, 
+                padding:'2px 8px', borderRadius:4, fontSize:12, 
+                background:'var(--ink)', color:'var(--paper)'
+              }}>
+                {h}
+                <span style={{cursor:'pointer', opacity:0.8, marginLeft:4}} onClick={() => {
+                  const hoodList = filters.neighborhood.split(',').map(x=>x.trim()).filter(Boolean);
+                  const next = hoodList.filter(x=>x!==h);
+                  upd('neighborhood', next.join(','));
+                }}>×</span>
+              </span>
+            ))}
           </div>
+        </Field>
+        <Field label="Price Range">
+          <div style={{display:'flex', gap:8, alignItems:'center'}}>
+            <input 
+              type="number" 
+              placeholder="Min ₪" 
+              value={filters.minPrice} 
+              onChange={e=>upd('minPrice', e.target.value)} 
+              style={{width:'100%', padding:'8px 10px', border:'1px solid var(--line-2)', borderRadius:6, background:'var(--paper)', fontSize:13}}
+            />
+            <span style={{color:'var(--muted)'}}>–</span>
+            <input 
+              type="number" 
+              placeholder="Max ₪" 
+              value={filters.maxPrice} 
+              onChange={e=>upd('maxPrice', e.target.value)} 
+              style={{width:'100%', padding:'8px 10px', border:'1px solid var(--line-2)', borderRadius:6, background:'var(--paper)', fontSize:13}}
+            />
+          </div>
+        </Field>
+        <Field label="Source">
+          <Select value={filters.source || 'all'} onChange={e=>upd('source', e.target.value)}>
+            <option value="all">All Sources</option>
+            <option value="yad2">Yad2</option>
+            <option value="madlan">Madlan</option>
+            <option value="facebook">Facebook</option>
+          </Select>
         </Field>
         <Field label={`Min score · ${filters.minScore}`}>
           <input type="range" min="0" max="100" value={filters.minScore} onChange={e=>upd('minScore',+e.target.value)} style={{width:'100%', accentColor:'var(--ink)'}}/>
@@ -969,8 +1024,27 @@ function Toolbar({count, total, filters, setFilters, state, set}){
     });
   }
   if(filters.minScore>0) active.push({k:'ms', label:`score ≥ ${filters.minScore}`, clear:()=>setFilters(f=>({...f,minScore:0}))});
-  if(filters.mamad) active.push({k:'m', label:'mamad', clear:()=>setFilters(f=>({...f,mamad:false}))});
   if(filters.q) active.push({k:'q', label:`"${filters.q}"`, clear:()=>setFilters(f=>({...f,q:''}))});
+  if(filters.minPrice || filters.maxPrice) {
+    let label = '';
+    if(filters.minPrice && filters.maxPrice) label = `₪${filters.minPrice}–₪${filters.maxPrice}`;
+    else if(filters.minPrice) label = `≥ ₪${filters.minPrice}`;
+    else label = `≤ ₪${filters.maxPrice}`;
+    active.push({k:'pr', label, clear:()=>setFilters(f=>({...f,minPrice:'',maxPrice:''}))});
+  }
+  if(filters.source && filters.source !== 'all') {
+    const srcLabel = filters.source === 'yad2' ? 'Yad2' : filters.source === 'madlan' ? 'Madlan' : 'Facebook';
+    active.push({k:'src', label: `source: ${srcLabel}`, clear:()=>setFilters(f=>({...f,source:''}))});
+  }
+  ['mamad','miklat','parking','elevator','balcony'].forEach(k => {
+    if(filters[k]) {
+      active.push({
+        k: 'feat-'+k, 
+        label: FEATURE_META[k].he, 
+        clear:()=>setFilters(f=>({...f,[k]:false}))
+      });
+    }
+  });
 
   return (
     <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', padding:'14px 28px', borderBottom:'1px solid var(--line)', gap:12}}>
