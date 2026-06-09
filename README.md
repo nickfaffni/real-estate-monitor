@@ -10,6 +10,8 @@
 
 Scrapes, analyzes, and notifies you about apartment listings from **Yad2**, **Madlan**, and **Facebook Marketplace**.
 
+![Web UI Dashboard](static/dashboard_screenshot.png)
+
 </div>
 
 ---
