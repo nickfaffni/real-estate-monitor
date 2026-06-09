@@ -352,6 +352,30 @@ class TestBaseScraper:
             scraper.cleanup()
             # Should complete without errors
 
+    def test_extract_features(self, mock_db_session):
+        """Test feature extraction with positive and negative cases"""
+        scraper = ConcreteScraper(mock_db_session, "test_source")
+        
+        # Test positive cases
+        res = scraper.extract_features("יש מעלית וחניה בדירה וגם ממד")
+        assert res['has_elevator'] is True
+        assert res['has_parking'] is True
+        assert res['has_mamad'] is True
+        assert res['has_miklat'] is False
+        
+        # Test pre-negation cases
+        res = scraper.extract_features("ללא מעלית, אין חניה ובלי ממד")
+        assert res['has_elevator'] is False
+        assert res['has_parking'] is False
+        assert res['has_mamad'] is False
+        
+        # Test post-negation cases
+        res = scraper.extract_features("מעלית: לא, חניה - אין, ממד: ללא, מקלט - לא")
+        assert res['has_elevator'] is False
+        assert res['has_parking'] is False
+        assert res['has_mamad'] is False
+        assert res['has_miklat'] is False
+
 
 class TestScraperWithRetry:
     """Test ScraperWithRetry wrapper"""
@@ -371,13 +395,14 @@ class TestScraperWithRetry:
         retry_scraper = ScraperWithRetry(scraper, max_retries=3, retry_delay=1)
 
         with patch.object(scraper, 'initialize'):
-            with patch.object(scraper, 'scrape', return_value=[{"title": "Test"}]):
-                with patch.object(scraper, 'cleanup'):
-                    with patch.object(scraper, 'update_scraping_state'):
-                        result = retry_scraper.scrape_with_retry()
+            with patch.object(scraper, '_is_browser_alive', return_value=True):
+                with patch.object(scraper, 'scrape', return_value=[{"title": "Test"}]):
+                    with patch.object(scraper, 'cleanup'):
+                        with patch.object(scraper, 'update_scraping_state'):
+                            result = retry_scraper.scrape_with_retry()
 
-                        assert len(result) == 1
-                        assert result[0]["title"] == "Test"
+                            assert len(result) == 1
+                            assert result[0]["title"] == "Test"
 
     def test_scrape_with_retry_failure_then_success(self, mock_db_session):
         """Test scrape fails then succeeds"""
@@ -393,13 +418,14 @@ class TestScraperWithRetry:
             return [{"title": "Test"}]
 
         with patch.object(scraper, 'initialize'):
-            with patch.object(scraper, 'scrape', side_effect=scrape_side_effect):
-                with patch.object(scraper, 'cleanup'):
-                    with patch.object(scraper, 'update_scraping_state'):
-                        with patch('time.sleep'):
-                            result = retry_scraper.scrape_with_retry()
+            with patch.object(scraper, '_is_browser_alive', return_value=True):
+                with patch.object(scraper, 'scrape', side_effect=scrape_side_effect):
+                    with patch.object(scraper, 'cleanup'):
+                        with patch.object(scraper, 'update_scraping_state'):
+                            with patch('time.sleep'):
+                                result = retry_scraper.scrape_with_retry()
 
-                            assert len(result) == 1
+                                assert len(result) == 1
 
     def test_scrape_with_retry_all_failures(self, mock_db_session):
         """Test all retry attempts fail"""

@@ -39,21 +39,20 @@ _FEATURE_TERMS = {
 }
 
 _NEGATION_WORDS = [
-    'אין', 'ללא', 'לא כולל', 'לא כוללת', 'בלי',
-    'no', 'without', 'not included',
+    'אין', 'ללא', 'לא כולל', 'לא כוללת', 'בלי', 'לא',
+    'no', 'without', 'not included', 'false', '0',
 ]
 
 _NEG_ALT = '|'.join(re.escape(w) for w in _NEGATION_WORDS)
 
 _FEATURE_PATTERNS = {
     feature: re.compile(
-        # Optional negation word directly before the term (no filler words —
-        # wider windows leak "אין חניה, מעלית" into flagging elevator as negated).
-        # Trailing \b prevents substring traps like "ממד" inside "ממדים".
-        # No leading \b: Hebrew single-letter prefixes (ו, ב, ה, ל, מ, ש, כ)
-        # attach directly to the next word ("ומעלית" = "and elevator").
-        r'(?:(?P<neg>' + _NEG_ALT + r')\s+)?'
-        r'(?P<term>' + '|'.join(re.escape(t) for t in terms) + r')\b',
+        # Pre-negation (directly before the term)
+        r'(?:(?P<neg_pre>' + _NEG_ALT + r')\s+)?'
+        # The term itself
+        r'(?P<term>' + '|'.join(re.escape(t) for t in terms) + r')\b'
+        # Post-negation (after the term, optional colon/dash/spaces followed by a negation word)
+        r'(?:\s*[:\-]?\s*(?P<neg_post>' + _NEG_ALT + r')\b)?',
         re.IGNORECASE,
     )
     for feature, terms in _FEATURE_TERMS.items()
@@ -274,13 +273,13 @@ class BaseScraper(ABC):
     @staticmethod
     def extract_features(haystack: str) -> Dict[str, bool]:
         """Return {has_elevator, has_parking, has_balcony, has_mamad} from a
-        haystack string. Honors negation: 'אין חניה', 'ללא מעלית', 'no parking'
-        resolve to False, not True."""
+        haystack string. Honors negation: 'אין חניה', 'ללא מעלית', 'no parking',
+        'ממד: לא' resolve to False, not True."""
         text = haystack or ''
         result = {feature: False for feature in _FEATURE_TERMS}
         for feature, pattern in _FEATURE_PATTERNS.items():
             for m in pattern.finditer(text):
-                if m.group('neg') is None:
+                if m.group('neg_pre') is None and m.group('neg_post') is None:
                     result[feature] = True
                     break
         return result
