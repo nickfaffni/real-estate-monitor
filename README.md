@@ -573,30 +573,40 @@ See [`tests/README.md`](tests/README.md) for detailed examples and best practice
 ```
 Real-Estate-Monitor/
 ├── main.py                    # Application entry point
+├── fetch_stations.py          # Script to fetch/seed transit stations from OSM
+├── backfill_images.py         # Script to backfill listing images from Madlan
 ├── app/                       # Main application package
 │   ├── core/                  # Core business logic
 │   │   ├── config.py          # Configuration management
 │   │   ├── database.py        # Database models & ORM
 │   │   ├── deal_score.py      # Scoring algorithm
-│   │   └── listing_processor.py  # Listing processing
+│   │   ├── lifecycle.py       # Global lifecycle & graceful shutdown
+│   │   ├── listing_processor.py # Listing processing
+│   │   └── transit.py         # Nominatim geocoding & station lookup
 │   ├── services/              # Application services
-│   │   ├── scheduler.py       # Job scheduling
-│   │   ├── dashboard.py       # Web dashboard (FastAPI)
-│   │   └── telegram_notifier.py  # Notifications
-│   ├── scrapers/              # Web scrapers
-│   │   ├── base_scraper.py    # Base scraper class
+│   │   ├── scheduler.py       # Job scheduling (APScheduler)
+│   │   ├── dashboard.py       # Web dashboard API & router (FastAPI)
+│   │   └── telegram_notifier.py # Telegram bot notifications
+│   ├── scrapers/              # Web scrapers (DrissionPage/Browser Mode)
+│   │   ├── base_scraper.py    # Base scraper & anti-bot check with retries
 │   │   ├── yad2_scraper.py    # Yad2 scraper
 │   │   ├── madlan_scraper.py  # Madlan scraper
-│   │   └── facebook_scraper.py  # Facebook scraper
+│   │   └── facebook_scraper.py # Facebook scraper
 │   └── utils/                 # Utility modules
-│       ├── phone_normalizer.py   # Phone normalization
+│       ├── phone_normalizer.py # Phone normalization
 │       ├── duplicate_detector.py # Duplicate detection
-│       └── listing_filter.py     # Listing filtering
+│       └── listing_filter.py   # Listing filtering
+├── static/                    # Frontend static assets
+│   ├── app.css                # Custom premium stylesheet
+│   └── app.js                 # Interactive dashboard behaviors
 ├── templates/                 # HTML templates
 │   ├── index.html             # Main dashboard
 │   └── listing_detail.html    # Listing detail page
+├── integration/               # Integration tests and assets
+│   ├── templates/             # Integration page templates
+│   └── static/                # Integration static assets
 ├── .env                       # Your configuration (create from .env.example)
-├── .env.example              # Configuration template
+├── .env.example               # Configuration template
 ├── requirements.txt           # Python dependencies
 ├── setup_project.py           # Automated setup script
 ├── test_setup.py              # System tests
